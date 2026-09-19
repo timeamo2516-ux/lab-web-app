@@ -1,0 +1,23 @@
+<div class="container">
+  <h1>🛒 Tech Store</h1>
+  <p>Venta de productos tecnológicos</p>
+  <p class="error">{{message}}</p>
+
+  <h2>Productos</h2>
+  <div class="grid">
+    <div class="card" *ngFor="let p of products">
+      <h3>{{p.name}}</h3>
+      <p>{{p.category}}</p>
+      <strong>S/ {{p.price | number:'1.2-2'}}</strong>
+      <p>Stock: {{p.stock}}</p>
+      <input type="number" min="1" [max]="p.stock" [(ngModel)]="quantity">
+      <button (click)="buy(p)" [disabled]="p.stock < 1">Comprar</button>
+    </div>
+  </div>
+
+  <h2>Ventas</h2>
+  <div class="card" *ngFor="let s of sales">
+    #{{s.id}} — {{s.productName}} — {{s.quantity}} unidad(es) —
+    S/ {{s.unitPrice * s.quantity | number:'1.2-2'}}
+  </div>
+</div>
