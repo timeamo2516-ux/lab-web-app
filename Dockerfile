@@ -21,8 +21,7 @@ RUN npm install
 COPY . .
 
 # Ejecuta el comando para compilar/empaquetar la aplicación (por la ruta generada, parece ser Angular)
-# El flag "--configuration production" optimiza el código para que sea más rápido y ligero en producción
-RUN npm run build -- --configuration production
+RUN npm run build 
 
 
 # ==========================================
