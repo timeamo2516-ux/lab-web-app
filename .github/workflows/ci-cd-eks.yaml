@@ -1,0 +1,192 @@
+name: CI-CD-EKS-kubectl
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+
+jobs:
+
+  static-analysis:
+    name: "1. Static Analysis"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Build web-app
+        run: |
+          npm install
+          npm run build
+
+#      - name: SonarQube Scan
+#        uses: SonarSource/sonarqube-scan-action@v8.2.1
+#        env:
+#          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
+
+  build-scan-push:
+    name: "2-4. Docker + Trivy + ECR"
+    runs-on: ubuntu-latest
+    needs: static-analysis
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: web-app
+            context: .
+            ecr_repository: web-app
+            container: web-app
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Define image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE="${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repository }}:${GITHUB_SHA}"
+
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+          echo "Image:"
+          echo "${IMAGE}"
+
+      - name: Containerize
+        run: |
+          docker build \
+            --pull \
+            --tag "${IMAGE}" \
+            "${{ matrix.context }}"
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+          vuln-type: os,library
+          scanners: vuln
+          trivy-config: trivy.yaml
+
+      - name: Push image to ECR
+        run: |
+          docker push "${IMAGE}"
+
+
+  deploy:
+    name: "5-7. kubectl Deploy + Rolling Update"
+    runs-on: ubuntu-latest
+    needs: build-scan-push
+
+    environment:
+      name: lab
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+
+      - name: Configure kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${EKS_CLUSTER_NAME}"
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Verify Kubernetes access
+        run: |
+          kubectl get namespace "${K8S_NAMESPACE}"
+
+      - name: Apply Kubernetes manifests
+        run: |
+          kubectl apply -f k8s/
+
+      - name: Calculate ECR registry
+        id: registry
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity \
+            --query Account \
+            --output text)
+
+          echo "registry=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Update web image
+        run: |
+          kubectl set image \
+            deployment/web-app \
+            web-app=${{ steps.registry.outputs.registry }}/web-app:${GITHUB_SHA} \
+            -n "${K8S_NAMESPACE}"
+
+      - name: Wait for web rollout
+        run: |
+          kubectl rollout status \
+            deployment/web-app \
+            -n "${K8S_NAMESPACE}" \
+            --timeout=180s
+
+      - name: Deployment summary
+        run: |
+          echo "=== Deployments ==="
+          kubectl get deployments \
+            -n "${K8S_NAMESPACE}" \
+            -o wide
+
+          echo ""
+          echo "=== Pods ==="
+          kubectl get pods \
+            -n "${K8S_NAMESPACE}" \
+            -o wide
+
+          echo ""
+          echo "=== Services ==="
+          kubectl get services \
+            -n "${K8S_NAMESPACE}"
