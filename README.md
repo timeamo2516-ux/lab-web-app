@@ -7,3 +7,4 @@ Aplicación Angular 19 mínima para consultar inventario y registrar ventas.
 - `/api/sales` se proxifica al microservicio de ventas.
 
 El contenedor usa Nginx sin privilegios y una construcción multistage.
+Laboratorio Helm
