@@ -1,0 +1,25 @@
+replicaCount: 2
+
+image:
+  repository: 216961644624.dkr.ecr.us-east-1.amazonaws.com/web-app
+  tag: "1.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: http
+
+ingress:
+  enabled: true
+  className: alb
+
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /
+
+  path: /
+  pathType: Prefix
+
+resources: {}

@@ -1,4 +1,4 @@
-name: CI-CD-EKS-kubectl
+name: CI-CD-EKS-Helm
 
 on:
   push:
@@ -15,11 +15,16 @@ env:
 
 jobs:
 
+  # ============================================================
+  # 1. STATIC ANALYSIS
+  # ============================================================
+
   static-analysis:
     name: "1. Static Analysis"
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v7.0.1
         with:
@@ -35,20 +40,27 @@ jobs:
           npm install
           npm run build
 
-#      - name: SonarQube Scan
-#        uses: SonarSource/sonarqube-scan-action@v8.2.1
-#        env:
-#          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-#          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+      # - name: SonarQube Scan
+      #   uses: SonarSource/sonarqube-scan-action@v8.2.1
+      #   env:
+      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      #     SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
+
+  # ============================================================
+  # 2. BUILD + TRIVY + ECR
+  # ============================================================
 
   build-scan-push:
     name: "2-4. Docker + Trivy + ECR"
+
     runs-on: ubuntu-latest
+
     needs: static-analysis
 
     strategy:
       fail-fast: true
+
       matrix:
         include:
           - component: web-app
@@ -108,9 +120,15 @@ jobs:
           docker push "${IMAGE}"
 
 
+  # ============================================================
+  # 3. HELM DEPLOY
+  # ============================================================
+
   deploy:
-    name: "5-7. kubectl Deploy + Rolling Update"
+    name: "5-7. Helm Deploy + Rolling Update"
+
     runs-on: ubuntu-latest
+
     needs: build-scan-push
 
     environment:
@@ -121,6 +139,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.1
 
+      # --------------------------------------------------------
+      # AWS
+      # --------------------------------------------------------
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.3.0
         with:
@@ -128,8 +150,16 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v5.1.0
+      # --------------------------------------------------------
+      # Helm
+      # --------------------------------------------------------
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      # --------------------------------------------------------
+      # Kubeconfig
+      # --------------------------------------------------------
 
       - name: Configure kubeconfig
         run: |
@@ -137,34 +167,57 @@ jobs:
             --region "${AWS_REGION}" \
             --name "${EKS_CLUSTER_NAME}"
 
+      # --------------------------------------------------------
+      # Verify AWS
+      # --------------------------------------------------------
+
       - name: Verify AWS identity
         run: |
           aws sts get-caller-identity
+
+      # --------------------------------------------------------
+      # Verify Kubernetes
+      # --------------------------------------------------------
 
       - name: Verify Kubernetes access
         run: |
           kubectl get namespace "${K8S_NAMESPACE}"
 
-      - name: Apply Kubernetes manifests
-        run: |
-          kubectl apply -f k8s/
+      # --------------------------------------------------------
+      # Helm lint
+      # --------------------------------------------------------
 
-      - name: Calculate ECR registry
-        id: registry
+      - name: Helm lint
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity \
-            --query Account \
-            --output text)
+          helm lint ./helm/web-app
 
-          echo "registry=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com" \
-            >> "$GITHUB_OUTPUT"
+      # --------------------------------------------------------
+      # Helm template
+      # --------------------------------------------------------
 
-      - name: Update web image
+      - name: Helm template
         run: |
-          kubectl set image \
-            deployment/web-app \
-            web-app=${{ steps.registry.outputs.registry }}/web-app:${GITHUB_SHA} \
-            -n "${K8S_NAMESPACE}"
+          helm template web-app \
+            ./helm/web-app \
+            --namespace "${K8S_NAMESPACE}" \
+            --set image.tag="${GITHUB_SHA}"
+
+      # --------------------------------------------------------
+      # Helm deploy
+      # --------------------------------------------------------
+
+      - name: Helm upgrade
+        run: |
+          helm upgrade --install web-app \
+            ./helm/web-app \
+            --namespace "${K8S_NAMESPACE}" \
+            --set image.tag="${GITHUB_SHA}" \
+            --wait \
+            --timeout 5m
+
+      # --------------------------------------------------------
+      # Rollout status
+      # --------------------------------------------------------
 
       - name: Wait for web rollout
         run: |
@@ -173,20 +226,40 @@ jobs:
             -n "${K8S_NAMESPACE}" \
             --timeout=180s
 
+      # --------------------------------------------------------
+      # Deployment summary
+      # --------------------------------------------------------
+
       - name: Deployment summary
         run: |
+
+          echo "=== Helm Releases ==="
+
+          helm list \
+            -n "${K8S_NAMESPACE}"
+
+          echo ""
           echo "=== Deployments ==="
+
           kubectl get deployments \
             -n "${K8S_NAMESPACE}" \
             -o wide
 
           echo ""
           echo "=== Pods ==="
+
           kubectl get pods \
             -n "${K8S_NAMESPACE}" \
             -o wide
 
           echo ""
           echo "=== Services ==="
+
           kubectl get services \
+            -n "${K8S_NAMESPACE}"
+
+          echo ""
+          echo "=== Ingress ==="
+
+          kubectl get ingress \
             -n "${K8S_NAMESPACE}"
